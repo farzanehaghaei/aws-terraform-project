@@ -1,0 +1,13 @@
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+tfplan
+*.tfplan
+**/.terraform/
+.terraform.lock.hcl
+*.tfvars
+!example.tfvars
+.aws/
+credentials
+.DS_Store
+.vscode/

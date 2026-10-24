@@ -1,0 +1,144 @@
+# =============================================================
+# GitHub Actions Pipeline for Terraform
+# What it does:
+#   - On Pull Request → runs terraform plan (shows what will change)
+#   - On merge to main → runs terraform apply (creates resources)
+# Security: AWS credentials stored as GitHub Secrets, never in code
+# =============================================================
+
+name: Terraform CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  TF_VERSION: "1.7.0"
+  AWS_REGION: "eu-central-1"
+
+jobs:
+  # -------------------------------------------------------
+  # JOB 1: Validate — check code format and syntax
+  # Runs on every PR and push
+  # -------------------------------------------------------
+  validate:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Check formatting — fails if code is not formatted
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        # Fix locally with: terraform fmt -recursive
+
+      # Check syntax — fails if there are errors in .tf files
+      - name: Terraform Validate (dev)
+        working-directory: environments/dev
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  # -------------------------------------------------------
+  # JOB 2: Security Scan — find security issues in the code
+  # Uses tfsec: scans Terraform for security misconfigurations
+  # -------------------------------------------------------
+  security-scan:
+    name: Security Scan (tfsec)
+    runs-on: ubuntu-latest
+    needs: validate   # only runs if validate passes
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          soft_fail: true   # don't fail the pipeline, just show warnings
+
+  # -------------------------------------------------------
+  # JOB 3: Plan — show what Terraform will create/change
+  # Runs on Pull Requests — so team can review before apply
+  # -------------------------------------------------------
+  plan:
+    name: Terraform Plan (dev)
+    runs-on: ubuntu-latest
+    needs: [validate, security-scan]
+    if: github.event_name == 'pull_request'
+
+    # AWS credentials — stored as GitHub Secrets (never in code!)
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: environments/dev
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: environments/dev
+        run: terraform plan -out=tfplan
+
+      # Post the plan as a comment on the Pull Request
+      # So the reviewer can see exactly what will change
+      - name: Comment Plan on PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Terraform plan completed. Review the Actions tab for details.'
+            })
+
+  # -------------------------------------------------------
+  # JOB 4: Apply — actually create the infrastructure
+  # Only runs when code is merged to main branch
+  # -------------------------------------------------------
+  apply:
+    name: Terraform Apply (dev)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: environments/dev
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: environments/dev
+        run: terraform apply -auto-approve
